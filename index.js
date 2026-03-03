@@ -5,12 +5,11 @@ const express = require("express");
 const LaunchDarkly = require("launchdarkly-node-server-sdk");
 
 const app = express();
-const port = 3000;
+const port = process.env.PORT || 3000;
 
-// Initialize LaunchDarkly client
+// LaunchDarkly client (server-side)
 const ldClient = LaunchDarkly.init(process.env.LD_SDK_KEY);
 
-// Log when connected
 ldClient.on("ready", () => {
   console.log("LaunchDarkly connected ✅");
 });
@@ -20,23 +19,16 @@ ldClient.on("failed", (err) => {
 });
 
 // Mock product list
-const products = [
-  "MacBook Pro",
-  "iPhone",
-  "AirPods",
-  "iPad",
-  "Apple Watch",
-];
+const products = ["MacBook Pro", "iPhone", "AirPods", "iPad", "Apple Watch"];
 
-// Simple recommendation algorithm
+// Simple algorithm: static ordering
 function simpleRecommendation() {
-  return products.slice(0, 2);
+  return [...products];
 }
 
-// Complex recommendation algorithm
+// Complex algorithm: shuffled ordering
 function complexRecommendation() {
-  const shuffled = [...products].sort(() => 0.5 - Math.random());
-  return shuffled.slice(0, 3);
+  return [...products].sort(() => 0.5 - Math.random());
 }
 
 // Health check route
@@ -44,8 +36,22 @@ app.get("/health", (req, res) => {
   res.json({ ok: true });
 });
 
-// Main recommendations endpoint
+// Demo homepage route
+app.get("/", (req, res) => {
+  res.send(`
+    <h2>LaunchDarkly Feature Flag + Experiment Demo ✅</h2>
+    <p>Try:</p>
+    <ul>
+      <li><a href="/recommendations?user=123&type=basic">/recommendations?user=123&type=basic</a></li>
+      <li><a href="/recommendations?user=999&type=premium">/recommendations?user=999&type=premium</a></li>
+    </ul>
+    <p>Also: <a href="/health">/health</a></p>
+  `);
+});
+
+// Recommendations endpoint
 app.get("/recommendations", async (req, res) => {
+  // LaunchDarkly "context" (older SDKs call this "user")
   const user = {
     key: req.query.user || "anonymous",
     user_type: req.query.type || "basic",
@@ -54,21 +60,29 @@ app.get("/recommendations", async (req, res) => {
   try {
     await ldClient.waitForInitialization();
 
-    // Feature flag: choose recommendation algorithm
+    // Feature flag: choose algorithm
     const useComplex = await ldClient.variation(
       "complex-recommendations",
       user,
       false
     );
 
-    // Experiment flag: choose short vs detailed recommendation count
+    // Experiment: short vs detailed (2 vs 3 recommendations)
     const expVariant = await ldClient.variation(
       "rec-count-experiment",
       user,
       "short"
     );
 
-    const count = expVariant === "detailed" ? 3 : 2;
+    // If LD returns "variation 0/1" for any reason, normalize it
+    const normalizedVariant =
+      expVariant === "variation 1"
+        ? "detailed"
+        : expVariant === "variation 0"
+        ? "short"
+        : expVariant;
+
+    const count = normalizedVariant === "detailed" ? 3 : 2;
 
     const baseRecommendations = useComplex
       ? complexRecommendation()
@@ -76,17 +90,17 @@ app.get("/recommendations", async (req, res) => {
 
     const recommendations = baseRecommendations.slice(0, count);
 
-    // Track event for experiment analytics
+    // Track an event (useful for experiment metrics)
     ldClient.track("recommendations_viewed", user, {
       algorithm: useComplex ? "complex" : "simple",
-      expVariant,
+      expVariant: normalizedVariant,
       count,
     });
 
     res.json({
       user,
       algorithm: useComplex ? "Complex" : "Simple",
-      expVariant,
+      expVariant: normalizedVariant,
       recommendations,
     });
   } catch (error) {
